@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import MarkdownPreview from "@uiw/react-markdown-preview";
 
 interface Message {
   user: "me" | "agent";
   text: string;
   timestamp: string;
+  type?: string; // Add type to distinguish event types
 }
 
 interface ChatProps {
@@ -15,10 +17,12 @@ interface ChatProps {
 export default function Chat({ token, userId, handleLogout }: ChatProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-  const [isConnected, setIsConnected] = useState(false); // Added connection state
+  const [isConnected, setIsConnected] = useState(false);
   const ws = useRef<WebSocket | null>(null);
   const reconnectAttempts = useRef(0);
   const reconnectInterval = useRef(1000);
+  const messageBuffer = useRef<string[]>([]);
+  const bufferTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const getCurrentTime = () => {
     const now = new Date();
@@ -30,7 +34,7 @@ export default function Chat({ token, userId, handleLogout }: ChatProps) {
 
     ws.current.onopen = () => {
       console.log("WebSocket connected");
-      setIsConnected(true); // Update connection status
+      setIsConnected(true);
       reconnectAttempts.current = 0;
       reconnectInterval.current = 1000;
 
@@ -38,7 +42,7 @@ export default function Chat({ token, userId, handleLogout }: ChatProps) {
         ws.current.send(
           JSON.stringify({
             token,
-            agent_name: "default",
+            agent_name: "astra",
             query: "init",
             session_id: "",
             user_id: userId,
@@ -51,53 +55,90 @@ export default function Chat({ token, userId, handleLogout }: ChatProps) {
 
     ws.current.onmessage = (event) => {
       try {
-        console.log("message incoming ", event.data);
         const msg = JSON.parse(event.data);
-        const newMessage: Message = {
-          user: "agent",
-          text: msg.error ? `Error: ${msg.error}` : msg.text || JSON.stringify(msg),
-          timestamp: getCurrentTime(),
-        };
-        setMessages((prev) => [...prev, newMessage]);
-      } catch {
+        const { type, payload, timestamp } = msg;
+        console.log("time stamp", timestamp)
+
+        if (type === "response_chunk") {
+          // Aggregate response chunks for Markdown rendering
+          const chunk = typeof payload === "object" && payload.chunk ? payload.chunk : JSON.stringify(payload);
+          messageBuffer.current.push(chunk);
+
+          // Clear any existing timeout
+          if (bufferTimeout.current) {
+            clearTimeout(bufferTimeout.current);
+          }
+
+          // Set a timeout to finalize the message after 500ms of no new chunks
+          bufferTimeout.current = setTimeout(() => {
+            const fullMessage = messageBuffer.current.join("");
+            if (fullMessage.trim()) {
+              setMessages((prev) => [
+                ...prev,
+                { user: "agent", text: fullMessage, timestamp: getCurrentTime(), type: "response_chunk" },
+              ]);
+            }
+            messageBuffer.current = []; // Clear buffer
+          }, 500);
+        } else if (type === "error") {
+          // Handle error events
+          const errorMessage = typeof payload === "object" && payload.message ? payload.message : JSON.stringify(payload);
+          setMessages((prev) => [
+            ...prev,
+            { user: "agent", text: `Error: ${errorMessage}`, timestamp: getCurrentTime(), type: "error" },
+          ]);
+        } else if (type === "intermediate") {
+          // Handle intermediate events (e.g., progress updates)
+          const messageText = typeof payload === "object" ? JSON.stringify(payload) : payload;
+          setMessages((prev) => [
+            ...prev,
+            { user: "agent", text: `Progress: ${messageText}`, timestamp: getCurrentTime(), type: "intermediate" },
+          ]);
+        } else if (type === "completed") {
+          // Handle completion events
+          const messageText = typeof payload === "object" ? JSON.stringify(payload) : payload;
+          setMessages((prev) => [
+            ...prev,
+            { user: "agent", text: `Completed: ${messageText}`, timestamp: getCurrentTime(), type: "completed" },
+          ]);
+        } else {
+          // Fallback for unknown event types
+          setMessages((prev) => [
+            ...prev,
+            { user: "agent", text: JSON.stringify(msg), timestamp: getCurrentTime(), type: "unknown" },
+          ]);
+        }
+      } catch (error) {
+        console.error("Failed to parse WebSocket message:", error);
         setMessages((prev) => [
           ...prev,
-          { user: "agent", text: event.data, timestamp: getCurrentTime() },
+          { user: "agent", text: `Error: Invalid message format - ${event.data}`, timestamp: getCurrentTime(), type: "error" },
         ]);
       }
     };
 
     ws.current.onclose = (event) => {
       console.log("WebSocket closed", event);
-      setIsConnected(false); // Update connection status
-      // if (reconnectAttempts.current < maxReconnectAttempts) {
-      //   setTimeout(() => {
-      //     console.log(`Reconnecting... Attempt ${reconnectAttempts.current + 1}`);
-      //     reconnectAttempts.current += 1;
-      //     reconnectInterval.current = Math.min(reconnectInterval.current * 2, 30000);
-      //     connectWebSocket();
-      //   }, reconnectInterval.current);
-      // } else {
-      //   console.log("Max reconnection attempts reached");
-      //   setMessages((prev) => [
-      //     ...prev,
-      //     { user: "agent", text: "Error: Unable to reconnect to server", timestamp: getCurrentTime() },
-      //   ]);
-      // }
+      setIsConnected(false);
+      if (bufferTimeout.current) {
+        clearTimeout(bufferTimeout.current);
+      }
     };
 
     ws.current.onerror = (error) => {
       console.error("WebSocket error", error);
-      setIsConnected(false); // Update connection status
+      setIsConnected(false);
       ws.current?.close();
     };
   };
 
   useEffect(() => {
-    // connectWebSocket();
     return () => {
       ws.current?.close();
       setIsConnected(false);
+      if (bufferTimeout.current) {
+        clearTimeout(bufferTimeout.current);
+      }
     };
   }, [token, userId]);
 
@@ -106,7 +147,7 @@ export default function Chat({ token, userId, handleLogout }: ChatProps) {
     if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
       setMessages((prev) => [
         ...prev,
-        { user: "agent", text: "Error: Not connected to server", timestamp: getCurrentTime() },
+        { user: "agent", text: "Error: Not connected to server", timestamp: getCurrentTime(), type: "error" },
       ]);
       return;
     }
@@ -114,7 +155,7 @@ export default function Chat({ token, userId, handleLogout }: ChatProps) {
     setMessages((prev) => [...prev, { user: "me", text: input, timestamp: getCurrentTime() }]);
     ws.current.send(
       JSON.stringify({
-        agent_name: "default",
+        agent_name: "astra",
         query: input,
         session_id: "",
         user_id: userId,
@@ -124,10 +165,9 @@ export default function Chat({ token, userId, handleLogout }: ChatProps) {
   };
 
   const handleConnect = () => {
-    if (!isConnected ) {
+    if (!isConnected) {
       connectWebSocket();
     }
-    
   };
 
   return (
@@ -144,21 +184,38 @@ export default function Chat({ token, userId, handleLogout }: ChatProps) {
           <button className="logout-btn" onClick={handleLogout}>
             Logout
           </button>
-          <span><i className="fas fa-cog"></i></span>
+          <span>
+            <i className="fas fa-cog"></i>
+          </span>
         </div>
       </header>
       <div className="messages">
         {messages.map((m, i) => (
           <div key={i} className={`message ${m.user === "me" ? "me" : "agent"}`}>
-            <div
-              className="msg-img"
-            ></div>
+            <div className="msg-img"></div>
             <div className="msg-bubble">
               <div className="msg-info">
                 <div className="msg-info-name">{m.user === "me" ? "You" : "Bot"}</div>
                 <div className="msg-info-time">{m.timestamp}</div>
               </div>
-              <div className="msg-text">{m.text}</div>
+              <div className="msg-text">
+                {m.user === "agent" && m.type === "response_chunk" ? (
+                  <MarkdownPreview
+                    source={m.text}
+                    className="markdown-preview"
+                    style={{
+                      padding: 0,
+                      background: "transparent",
+                      color: "#333333",
+                      fontSize: "14px",
+                      fontWeight: "400",
+                      fontFamily: "Poppins",
+                    }}
+                  />
+                ) : (
+                  <span>{m.text}</span>
+                )}
+              </div>
             </div>
           </div>
         ))}
@@ -170,7 +227,7 @@ export default function Chat({ token, userId, handleLogout }: ChatProps) {
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && sendMessage()}
           placeholder="Enter your message..."
-          disabled={!isConnected} // Disable input when not connected
+          disabled={!isConnected}
         />
         <button onClick={sendMessage} disabled={!isConnected}>
           Send
