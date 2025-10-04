@@ -5,7 +5,12 @@ interface Message {
   user: "me" | "agent";
   text: string;
   timestamp: string;
-  type?: string; // Add type to distinguish event types
+  type?: string;
+}
+
+interface IntermediateMessage {
+  text: string;
+  timestamp: string;
 }
 
 interface ChatProps {
@@ -16,6 +21,7 @@ interface ChatProps {
 
 export default function Chat({ token, userId, handleLogout }: ChatProps) {
   const [messages, setMessages] = useState<Message[]>([]);
+  const [intermediateMessages, setIntermediateMessages] = useState<IntermediateMessage[]>([]);
   const [input, setInput] = useState("");
   const [isConnected, setIsConnected] = useState(false);
   const ws = useRef<WebSocket | null>(null);
@@ -56,20 +62,16 @@ export default function Chat({ token, userId, handleLogout }: ChatProps) {
     ws.current.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
-        const { type, payload, timestamp } = msg;
-        console.log("time stamp", timestamp)
+        const { type, payload } = msg;
 
         if (type === "response_chunk") {
-          // Aggregate response chunks for Markdown rendering
           const chunk = typeof payload === "object" && payload.chunk ? payload.chunk : JSON.stringify(payload);
           messageBuffer.current.push(chunk);
 
-          // Clear any existing timeout
           if (bufferTimeout.current) {
             clearTimeout(bufferTimeout.current);
           }
 
-          // Set a timeout to finalize the message after 500ms of no new chunks
           bufferTimeout.current = setTimeout(() => {
             const fullMessage = messageBuffer.current.join("");
             if (fullMessage.trim()) {
@@ -78,31 +80,25 @@ export default function Chat({ token, userId, handleLogout }: ChatProps) {
                 { user: "agent", text: fullMessage, timestamp: getCurrentTime(), type: "response_chunk" },
               ]);
             }
-            messageBuffer.current = []; // Clear buffer
+            messageBuffer.current = [];
           }, 500);
         } else if (type === "error") {
-          // Handle error events
           const errorMessage = typeof payload === "object" && payload.message ? payload.message : JSON.stringify(payload);
           setMessages((prev) => [
             ...prev,
             { user: "agent", text: `Error: ${errorMessage}`, timestamp: getCurrentTime(), type: "error" },
           ]);
-        } else if (type === "intermediate") {
-          // Handle intermediate events (e.g., progress updates)
+        } else if (type === "intermediate" || type === "completed") {
           const messageText = typeof payload === "object" ? JSON.stringify(payload) : payload;
-          setMessages((prev) => [
+          setIntermediateMessages((prev) => [
             ...prev,
-            { user: "agent", text: `Progress: ${messageText}`, timestamp: getCurrentTime(), type: "intermediate" },
+            { text: `Progress: ${messageText}`, timestamp: getCurrentTime() },
           ]);
-        } else if (type === "completed") {
-          // Handle completion events
-          const messageText = typeof payload === "object" ? JSON.stringify(payload) : payload;
-          setMessages((prev) => [
-            ...prev,
-            { user: "agent", text: `Completed: ${messageText}`, timestamp: getCurrentTime(), type: "completed" },
-          ]);
-        } else {
-          // Fallback for unknown event types
+          // // Auto-clear intermediate messages after 5 seconds
+          // setTimeout(() => {
+          //   setIntermediateMessages((prev) => prev.slice(1));
+          // }, 5000);
+        }  else {
           setMessages((prev) => [
             ...prev,
             { user: "agent", text: JSON.stringify(msg), timestamp: getCurrentTime(), type: "unknown" },
@@ -189,6 +185,14 @@ export default function Chat({ token, userId, handleLogout }: ChatProps) {
           </span>
         </div>
       </header>
+      <div className="intermediate-messages">
+        {intermediateMessages.map((m, i) => (
+          <div key={i} className="intermediate-message">
+            <span className="intermediate-text">{m.text}</span>
+            <span className="intermediate-time">{m.timestamp}</span>
+          </div>
+        ))}
+      </div>
       <div className="messages">
         {messages.map((m, i) => (
           <div key={i} className={`message ${m.user === "me" ? "me" : "agent"}`}>
