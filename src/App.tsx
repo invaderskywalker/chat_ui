@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import Chat from "./Chat";
 import Login from "./Login";
 import './App.css';
+import './styles/markdown.css'
 
 function App() {
   const [token, setToken] = useState<string | null>(null);
